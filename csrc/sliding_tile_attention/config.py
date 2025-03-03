@@ -2,7 +2,7 @@
 sources = {
     'attn': {
         'source_files': {
-            'h100': ['st_attn/st_attn_h100.cu', 'st_attn/st_attn_h100_344.cu']
+            'h100': ['st_attn/st_attn_h100.cu', 'st_attn/st_attn_h100_388.cu']
         }
     }
 }

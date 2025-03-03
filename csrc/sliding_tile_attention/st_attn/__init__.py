@@ -1,7 +1,7 @@
 import math
 
 import torch
-from st_attn_cuda import sta_fwd
+from st_attn_cuda import sta_fwd, sta_fwd_388
 
 
 def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_text=True):
@@ -35,14 +35,12 @@ def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_te
     return hidden_states[:, :, :seq_length]
 
 
-def sliding_tile_attention_344(q_all, k_all, v_all, window_size, text_length, has_text=True):
+def sliding_tile_attention_388(q_all, k_all, v_all, window_size, text_length, has_text=True):
     seq_length = q_all.shape[2]
     if has_text:
-        assert q_all.shape[
-            2] ==  18 * 32 * 56, "STA currently only supports video with latent size (18, 32, 56), which is 69 frames x 512 x 896 pixels"
+        assert q_all.shape[2] == 18 * 32 * 56, "STA currently only supports video with latent size (18, 32, 56)"
         assert q_all.shape[1] == len(window_size), "Number of heads must match the number of window sizes"
-        tile_size = 3 * 4 * 4
-        target_size = math.ceil(seq_length / tile_size) * tile_size
+        target_size = math.ceil(seq_length / 192) * 192
         pad_size = target_size - seq_length
         if pad_size > 0:
             q_all = torch.cat([q_all, q_all[:, :, -pad_size:]], dim=2)
@@ -61,7 +59,7 @@ def sliding_tile_attention_344(q_all, k_all, v_all, window_size, text_length, ha
                                                                                       head_index:head_index + 1],
                                               hidden_states[batch:batch + 1, head_index:head_index + 1])
 
-            _ = sta_fwd(q_head, k_head, v_head, o_head, t_kernel, h_kernel, w_kernel, text_length, False, has_text)
+            _ = sta_fwd_388(q_head, k_head, v_head, o_head, t_kernel, h_kernel, w_kernel, text_length, False, has_text)
     if has_text:
-        _ = sta_fwd(q_all, k_all, v_all, hidden_states, 3, 3, 3, text_length, True, True)
+        _ = sta_fwd_388(q_all, k_all, v_all, hidden_states, 3, 3, 3, text_length, True, True)
     return hidden_states[:, :, :seq_length]
