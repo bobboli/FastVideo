@@ -9,14 +9,14 @@ flex_attention = torch.compile(flex_attention, dynamic=False)
 
 
 def flex_test(Q, K, V, kernel_size):
-    mask = get_sliding_tile_attention_mask(kernel_size, (6, 8, 8), (36, 48, 48), 39, 'cuda', 0)
+    mask = get_sliding_tile_attention_mask(kernel_size, (3, 4, 4), (18, 32, 56), 256, 'cuda', 0)
     output = flex_attention(Q, K, V, block_mask=mask)
 
     return output
 
 
-def h100_fwd_kernel_test(Q, K, V, kernel_size):
-    o = sliding_tile_attention(Q, K, V, [kernel_size] * 24, 39, False)
+def h100_fwd_kernel_test(Q, K, V, kernel_size, h):
+    o = sliding_tile_attention(Q, K, V, [kernel_size] * h, 256, False)
     return o
 
 
@@ -37,7 +37,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=50, error_mo
             'max_diff': 0
         },
     }
-    kernel_size_ls = [(6, 1, 6), (6, 6, 1)]
+    kernel_size_ls = [(2, 2, 5), (3, 2, 4)]
     from tqdm import tqdm
     for kernel_size in tqdm(kernel_size_ls):
         for _ in range(num_iterations):
@@ -46,7 +46,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=50, error_mo
             Q = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             K = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             V = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
-            tk_o = h100_fwd_kernel_test(Q, K, V, kernel_size)
+            tk_o = h100_fwd_kernel_test(Q, K, V, kernel_size, h)
             pt_o = flex_test(Q, K, V, kernel_size)
 
             diff = pt_o - tk_o
@@ -73,7 +73,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=50, error_mo
 
 
 def generate_error_graphs(b, h, d, causal, mean, std, error_mode='all'):
-    seq_lengths = [82944]
+    seq_lengths = [18 * 32 * 56] # [82944]
 
     tk_avg_errors, tk_max_errors = [], []
 

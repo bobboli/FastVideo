@@ -24,7 +24,8 @@ cuda_flags = [
     '-DNDEBUG', '-Xcompiler=-Wno-psabi', '-Xcompiler=-fno-strict-aliasing', '--expt-extended-lambda',
     '--expt-relaxed-constexpr', '-forward-unknown-to-host-compiler', '--use_fast_math', '-std=c++20', '-O3',
     '-Xnvlink=--verbose', '-Xptxas=--verbose', '-Xptxas=--warn-on-spills', f'-I{tk_root}/include',
-    f'-I{tk_root}/prototype', f'-I{python_include}', '-DTORCH_COMPILE'
+    f'-I{tk_root}/prototype', f'-I{python_include}', '-DTORCH_COMPILE',
+    '-w',
 ] + torch_include.split()
 cpp_flags = ['-std=c++20', '-O3']
 
