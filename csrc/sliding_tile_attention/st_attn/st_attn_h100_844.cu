@@ -201,9 +201,9 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
                 for (int kt = k_t_min; kt <= k_t_max; kt++) {
                     for (int kh = k_h_min; kh <= k_h_max; kh++) {
                         for (int kw = k_w_min; kw <= k_w_max; kw++) {
-                            for (int j = 0; j <= 2; j++){
+                            for (int j = 0; j < n_kv_per_attn_tile; j++){
                                 if (count >= K::stages - 1) {
-                                    int index = ((kt * (CH * CW)) + (kh * CW) + kw) * 3 + j;
+                                    int index = ((kt * (CH * CW)) + (kh * CW) + kw) * n_kv_per_attn_tile + j;
                                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, index, 0};
                                     tma::expect_bytes(k_smem_arrived[count%K::stages], sizeof(k_tile));
                                     tma::load_async(k_smem[count%K::stages], g.k, kv_tile_idx, k_smem_arrived[count%K::stages]);
@@ -257,7 +257,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
             // the last three kv blocks are for text, we process them separately
             kv_iters = img_kv_blocks - 1;
         } else {
-            kv_iters = CLAMP(DT*2+1, 1, CT) * CLAMP(DH*2+1, 1, CH) * CLAMP(DW*2+1, 1, CW) * 3 - 1 ; 
+            kv_iters = CLAMP(DT*2+1, 1, CT) * CLAMP(DH*2+1, 1, CH) * CLAMP(DW*2+1, 1, CW) * n_kv_per_attn_tile - 1 ; 
         }
 
         kittens::wait(qsmem_semaphore, 0);
