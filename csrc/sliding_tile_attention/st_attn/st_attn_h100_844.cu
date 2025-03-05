@@ -520,7 +520,7 @@ sta_forward_844(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor
     TORCH_CHECK(has_text, "Currently only supports has_text");
     TORCH_CHECK( (seq_len - max_text_len) % (CONSUMER_WARPGROUPS * K::qo_height) == 0, "sequence length of the image part must be divisible by 128");
     TORCH_CHECK( max_text_len % (CONSUMER_WARPGROUPS * K::qo_height) == 0, "sequence length of the text part must be divisible by 128");
-    dim3 grid_image((seq_len - max_text_len)/(CONSUMER_WARPGROUPS * K::qo_height * 4), qo_heads, batch);  //todo4
+    dim3 grid_image((seq_len - max_text_len)/(CONSUMER_WARPGROUPS * K::qo_height), qo_heads, batch);  //todo4
     dim3 grid_text(max_text_len / (CONSUMER_WARPGROUPS * K::qo_height), qo_heads, batch);  // todo5
 
     if (!process_text) 
