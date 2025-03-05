@@ -81,13 +81,8 @@ def sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, ha
 
     assert q_all.shape[2] == 16 * 32 * 56 + 256, "STA currently only supports video with latent size (16, 32, 56) with 256 text tokens"
     assert q_all.shape[1] == len(window_size), "Number of heads must match the number of window sizes"
-    target_size = math.ceil(seq_length / 128) * 128
-    pad_size = target_size - seq_length
-    if pad_size > 0:
-        print(f"===Padding {pad_size} tokens to the sequence")
-        q_all = torch.cat([q_all, q_all[:, :, -pad_size:]], dim=2)
-        k_all = torch.cat([k_all, k_all[:, :, -pad_size:]], dim=2)
-        v_all = torch.cat([v_all, v_all[:, :, -pad_size:]], dim=2)
+    assert seq_length % 128 == 0, "sequence length of the image part must be divisible by 128"
+
 
     hidden_states = torch.empty_like(q_all)
     # This for loop is ugly. but it is actually quite efficient. The sequence dimension alone can already oversubscribe SMs
@@ -106,6 +101,6 @@ def sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, ha
                                             k_all[batch:batch + 1], v_all[batch:batch + 1],
                                             hidden_states[batch:batch + 1])   
 
-        _ = sta_fwd_844(q_head, k_head, v_head, o_head, 2, 3, 3,  text_length, True, True)
+        _ = sta_fwd_844(q_head, k_head, v_head, o_head, 2, 3, 3,  text_length, True, has_text)
         
     return hidden_states[:, :, :seq_length]
