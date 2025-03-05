@@ -64,10 +64,8 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
     const int DT, const int DH, const int DW, 
     const int CT, const int CH, const int CW) 
 {
-    // tile_size = 8,4,4 = 128    qo_height * CONSUMER_WARPGROUPS=128, kv_height=64
-    constexpr int n_rows_per_attn_tile = 1;
-    constexpr int n_cols_per_attn_tile = 2;
-    constexpr int n_seqs_per_attn_tile = n_rows_per_attn_tile * n_cols_per_attn_tile;  
+
+    static_assert(is_causal == false, "Currently only supports non-causal attention");
 
     extern __shared__ int __shm[]; 
     tma_swizzle_allocator al((int*)&__shm[0]);
@@ -75,6 +73,15 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
 
     using K = fwd_attend_ker_tile_dims<D>;
     constexpr int text_kv_blocks = max_text_len / K::kv_height;  // 4
+
+    // tile_size = 8,4,4 = 128    qo_height * CONSUMER_WARPGROUPS=128, kv_height=64
+    constexpr int tile_size = 8*4*4;
+    constexpr int n_kv_per_attn_tile = tile_size / K::kv_height;  // 2
+    constexpr int n_qo_per_attn_tile = tile_size / K::qo_height;  // 2
+
+    // if(blockIdx.x == 0 && threadIdx.x == 0) {
+    //     printf("text_L: %d\n", g.text_L);
+    // }
 
     using q_tile    =         st_bf<K::qo_height, K::tile_width>;
     using k_tile    =         st_bf<K::kv_height, K::tile_width>;
@@ -97,7 +104,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
     int kv_head_idx = blockIdx.y / g.hr;
     int seq_idx;
     if constexpr (text_q) {
-        seq_idx = CT * CH * CW * n_seqs_per_attn_tile + blockIdx.x * CONSUMER_WARPGROUPS;
+        seq_idx = CT * CH * CW * n_qo_per_attn_tile + blockIdx.x * CONSUMER_WARPGROUPS;  // todo 6
     } else {
         seq_idx = blockIdx.x * CONSUMER_WARPGROUPS; 
     }
@@ -117,7 +124,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
             tma::load_async(q_smem[wg], g.q, q_tile_idx, qsmem_semaphore);
         }
 
-        if constexpr (text_q){
+        if constexpr (text_q){  // todo7
             for (int j = 0; j < K::stages - 1; j++) {
                 coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, j, 0};
                 tma::expect_bytes(k_smem_arrived[j], sizeof(k_tile));
@@ -126,18 +133,18 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
                 tma::load_async(v_smem[j], g.v, kv_tile_idx, v_smem_arrived[j]);
             }
         } else {
-            int qt = seq_idx / n_seqs_per_attn_tile / (CH * CW);
-            int qh = (seq_idx / n_seqs_per_attn_tile) % (CH * CW) / CW;
-            int qw = (seq_idx / n_seqs_per_attn_tile) % CW;
+            int qt = seq_idx / n_qo_per_attn_tile / (CH * CW);
+            int qh = (seq_idx / n_qo_per_attn_tile) % (CH * CW) / CW;
+            int qw = (seq_idx / n_qo_per_attn_tile) % CW;
             qt = CLAMP(qt, DT, CT-DT-1);
             qh = CLAMP(qh, DH, CH-DH-1);
             qw = CLAMP(qw, DW, CW-DW-1);
             int count = 0;
             int j = 0;
             while (count < K::stages - 1) {
-                int kt = j / n_cols_per_attn_tile / (CH * CW);
-                int kh = (j / n_cols_per_attn_tile) % (CH * CW) / CW;
-                int kw = (j / n_cols_per_attn_tile) % CW;
+                int kt = j / n_kv_per_attn_tile / (CH * CW);
+                int kh = (j / n_kv_per_attn_tile) % (CH * CW) / CW;
+                int kw = (j / n_kv_per_attn_tile) % CW;
                 bool mask = (ABS(qt - kt) <= DT) && (ABS(qh - kh) <= DH) && (ABS(qw - kw) <= DW);
                 if (mask){
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, j, 0};
@@ -155,17 +162,19 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
 
     int pipe_idx = K::stages - 1; 
     
+    // Producer warpgroup
     if(warpgroupid == NUM_WARPGROUPS-1) {
         warpgroup::decrease_registers<32>();      
         
         int kv_iters; 
-        if constexpr (is_causal) {
-            kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
-            kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
-        }
-        else { kv_iters = kv_blocks - (K::stages-1);}  // todo2 
+        // if constexpr (is_causal) {
+        //     kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
+        //     kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
+        // }
+        //else 
+        { kv_iters = kv_blocks - (K::stages-1);}  // todo2 
 
-        if(warpid == NUM_WORKERS-4) {  // todo3
+        if(warpid == NUM_WORKERS-4) {  // leading warp of the producer warpgroup
             if constexpr (text_q){
                 for (auto kv_idx = pipe_idx - 1; kv_idx <= kv_iters; kv_idx++) {
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, kv_idx + 1, 0};
@@ -176,9 +185,9 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
                     kittens::wait(compute_done[(kv_idx)%K::stages], (kv_idx/K::stages)%2);
                 }
             } else {
-                int qt = seq_idx / n_seqs_per_attn_tile / (CH * CW);
-                int qh = (seq_idx / n_seqs_per_attn_tile) % (CH * CW) / CW;
-                int qw = (seq_idx / n_seqs_per_attn_tile) % CW;
+                int qt = seq_idx / n_qo_per_attn_tile / (CH * CW);
+                int qh = (seq_idx / n_qo_per_attn_tile) % (CH * CW) / CW;
+                int qw = (seq_idx / n_qo_per_attn_tile) % CW;
                 qt = CLAMP(qt, DT, CT-DT-1);
                 qh = CLAMP(qh, DH, CH-DH-1);
                 qw = CLAMP(qw, DW, CW-DW-1);
@@ -224,6 +233,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
 
         }
     }
+    // Consumer warpgroup
     else {
         warpgroup::increase_registers<160>();
 
@@ -238,11 +248,12 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
         zero(o_reg);
 
         int kv_iters; 
-        if constexpr (is_causal) {
-            kv_iters = (seq_idx * 4) - 1 + (CONSUMER_WARPGROUPS * 4);
-            kv_iters = (kv_iters/8);
-        }
-        else if constexpr (text_q){ 
+        // if constexpr (is_causal) {
+        //     kv_iters = (seq_idx * 4) - 1 + (CONSUMER_WARPGROUPS * 4);
+        //     kv_iters = (kv_iters/8);
+        // }
+        // else 
+        if constexpr (text_q){ 
             // the last three kv blocks are for text, we process them separately
             kv_iters = img_kv_blocks - 1;
         } else {
