@@ -84,6 +84,7 @@ def sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, ha
     target_size = math.ceil(seq_length / 128) * 128
     pad_size = target_size - seq_length
     if pad_size > 0:
+        print(f"===Padding {pad_size} tokens to the sequence")
         q_all = torch.cat([q_all, q_all[:, :, -pad_size:]], dim=2)
         k_all = torch.cat([k_all, k_all[:, :, -pad_size:]], dim=2)
         v_all = torch.cat([v_all, v_all[:, :, -pad_size:]], dim=2)

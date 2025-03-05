@@ -78,7 +78,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
     int img_kv_blocks;
     int kv_blocks   = g.N / (K::kv_height);
     if constexpr (text_kv) {
-        img_kv_blocks = kv_blocks - 3;
+        img_kv_blocks = kv_blocks - 3;  // todo1  256 / 64
     } else {
         img_kv_blocks = kv_blocks;
     }
@@ -151,9 +151,9 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
             kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
             kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
         }
-        else { kv_iters = kv_blocks-2;}
+        else { kv_iters = kv_blocks-2;}  // todo2  related to stages. <=
 
-        if(warpid == NUM_WORKERS-4) {
+        if(warpid == NUM_WORKERS-4) {  // todo3   first warp of the producer warpgroup
             if constexpr (text_q){
                 for (auto kv_idx = pipe_idx - 1; kv_idx <= kv_iters; kv_idx++) {
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, kv_idx + 1, 0};
@@ -446,8 +446,8 @@ sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, 
         auto threads  = NUM_WORKERS * kittens::WARP_THREADS;
         if (has_text) {
             // TORCH_CHECK(seq_len % (CONSUMER_WARPGROUPS*kittens::TILE_DIM*4) == 0, "sequence length must be divisible by 192");
-            dim3 grid_image(seq_len/(CONSUMER_WARPGROUPS*kittens::TILE_ROW_DIM<bf16>*4-2), qo_heads, batch);
-            dim3 grid_text(2, qo_heads, batch);
+            dim3 grid_image(seq_len/(CONSUMER_WARPGROUPS*kittens::TILE_ROW_DIM<bf16>*4-2), qo_heads, batch);  //todo4  bug?
+            dim3 grid_text(2, qo_heads, batch);  //todo5  384 / 192
             if (!process_text) {
                 if (kernel_t_size == 3 && kernel_h_size == 3 && kernel_w_size == 3) {
 

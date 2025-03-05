@@ -20,7 +20,6 @@ std = 10
 def flex_test(Q, K, V, kernel_size):
     # Text-specific parameters for 388 implementation
     mask = get_sliding_tile_attention_mask(kernel_size, (3, 8, 8), (18, 32, 56), 256, 'cuda', 256)
-    print(Q.shape, K.shape, V.shape, mask.shape)
     output = flex_attention(Q, K, V, block_mask=mask)
     return output
 

@@ -30,7 +30,7 @@ template<> struct fwd_attend_ker_tile_dims<128> {
     constexpr static int stages     = (3); 
 };
 
-constexpr int text_kv_blocks = 4;  // text length = 256, kv_height=64
+constexpr int max_text_len = 256;
 
 
 template<int D> struct fwd_globals {
@@ -74,6 +74,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
     int warpid = kittens::warpid(), warpgroupid = warpid/kittens::WARPGROUP_WARPS;
 
     using K = fwd_attend_ker_tile_dims<D>;
+    constexpr int text_kv_blocks = max_text_len / K::kv_height;  // 4
 
     using q_tile    =         st_bf<K::qo_height, K::tile_width>;
     using k_tile    =         st_bf<K::kv_height, K::tile_width>;
@@ -89,7 +90,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
     int img_kv_blocks;
     int kv_blocks   = g.N / (K::kv_height);
     if constexpr (text_kv) {
-        img_kv_blocks = kv_blocks - text_kv_blocks;
+        img_kv_blocks = kv_blocks - text_kv_blocks;  // todo1
     } else {
         img_kv_blocks = kv_blocks;
     }
@@ -162,9 +163,9 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
             kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
             kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
         }
-        else { kv_iters = kv_blocks-2;}
+        else { kv_iters = kv_blocks - (K::stages-1);}  // todo2 
 
-        if(warpid == NUM_WORKERS-4) {
+        if(warpid == NUM_WORKERS-4) {  // todo3
             if constexpr (text_q){
                 for (auto kv_idx = pipe_idx - 1; kv_idx <= kv_iters; kv_idx++) {
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, kv_idx + 1, 0};
@@ -447,6 +448,7 @@ sta_forward_844(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor
     using o_global = gl<bf16,  -1, -1, -1, -1, o_tile>;
 
     using globals      = fwd_globals<128>;
+    using K = fwd_attend_ker_tile_dims<128>;
 
     q_global qg_arg{d_q, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), static_cast<unsigned int>(seq_len), 128U};
     k_global kg_arg{d_k, static_cast<unsigned int>(batch), static_cast<unsigned int>(kv_heads), static_cast<unsigned int>(seq_len), 128U};
@@ -505,9 +507,10 @@ sta_forward_844(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor
     constexpr int CW = 14;
     
     TORCH_CHECK(has_text, "Currently only supports has_text");
-    // TORCH_CHECK(seq_len % (CONSUMER_WARPGROUPS*kittens::TILE_DIM*4) == 0, "sequence length must be divisible by 192");
-    dim3 grid_image(seq_len/(CONSUMER_WARPGROUPS*kittens::TILE_ROW_DIM<bf16>*4), qo_heads, batch);
-    dim3 grid_text(2, qo_heads, batch);
+    TORCH_CHECK( (seq_len - max_text_len) % (CONSUMER_WARPGROUPS * K::qo_height) == 0, "sequence length of the image part must be divisible by 128");
+    TORCH_CHECK( max_text_len % (CONSUMER_WARPGROUPS * K::qo_height) == 0, "sequence length of the text part must be divisible by 128");
+    dim3 grid_image((seq_len - max_text_len)/(CONSUMER_WARPGROUPS * K::qo_height * 4), qo_heads, batch);  //todo4
+    dim3 grid_text(max_text_len / (CONSUMER_WARPGROUPS * K::qo_height), qo_heads, batch);  // todo5
 
     if (!process_text) 
     {

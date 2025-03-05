@@ -4,7 +4,7 @@ from st_attn import sliding_tile_attention_844
 from torch.nn.attention.flex_attention import flex_attention
 from tqdm import tqdm
 
-print("Testing 688 implementation with text processing enabled")
+print("Testing 844 implementation with text processing enabled")
 
 flex_attention = torch.compile(flex_attention, dynamic=False)
 
@@ -21,7 +21,7 @@ tile_size = (8, 4, 4)
 latent_size = (16, 32, 56)
 n_tiles = (2, 8, 14)
 
-text_length = 256
+text_length =  256
 text_max_len = 256
 
 def flex_test(Q, K, V, kernel_size):
@@ -33,7 +33,7 @@ def flex_test(Q, K, V, kernel_size):
 
 def h100_fwd_kernel_test(Q, K, V, kernel_size):
     # Enable text processing with has_text=True
-    o = sliding_tile_attention_844(Q, K, V, [kernel_size] * h, 256, has_text=True)
+    o = sliding_tile_attention_844(Q, K, V, [kernel_size] * h, text_length, has_text=True)
     return o
 
 
@@ -66,12 +66,19 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
             Q = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             K = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             V = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
+
             
             try:
                 tk_o = h100_fwd_kernel_test(Q, K, V, kernel_size)
                 pt_o = flex_test(Q, K, V, kernel_size)
 
                 diff = pt_o - tk_o
+
+                # debugging start
+                diff_batch_head = diff[0, 0, :, :]
+                print(diff_batch_head.shape)
+                # debugging end
+
                 abs_diff = torch.abs(diff)
                 current_max_diff = torch.max(abs_diff).item()
                 current_avg_diff = torch.sum(abs_diff).item() / (b * h * n * d)
@@ -114,7 +121,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
 
 
 def generate_error_graphs(b, h, d, causal, mean, std, error_mode='all'):
-    seq_lengths = [latent_size[0] * latent_size[1] * latent_size[2] + text_length]
+    seq_lengths = [latent_size[0] * latent_size[1] * latent_size[2] + text_max_len]
 
     tk_avg_errors, tk_max_errors = [], []
 
