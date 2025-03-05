@@ -100,6 +100,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
 
         tma::expect_bytes(qsmem_semaphore, sizeof(q_smem));
 
+        // Load CONSUMER_WARPGROUPS q tiles
         for (int wg = 0; wg < CONSUMER_WARPGROUPS; wg++) {
             coord<q_tile> q_tile_idx = {blockIdx.z, blockIdx.y, (seq_idx) + wg, 0};
             tma::load_async(q_smem[wg], g.q, q_tile_idx, qsmem_semaphore);
@@ -122,6 +123,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
             qw = CLAMP(qw, DW, CW-DW-1);
             int count = 0;
             int j = 0;
+            // Load stages-1 kv tiles
             while (count < K::stages - 1) {
                 int kt = j / 3 / (CH * CW);
                 int kh = (j / 3) % (CH * CW) / CW;
@@ -143,6 +145,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
 
     int pipe_idx = K::stages - 1; 
     
+    // Producer warpgroup
     if(warpgroupid == NUM_WARPGROUPS-1) {
         warpgroup::decrease_registers<32>();      
         
@@ -212,6 +215,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
 
         }
     }
+    // Consumer warpgroup
     else {
         warpgroup::increase_registers<160>();
 
@@ -234,7 +238,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
             // the last three kv blocks are for text, we process them separately
             kv_iters = img_kv_blocks - 1;
         } else {
-            kv_iters = CLAMP(DT*2+1, 1, CT) * CLAMP(DH*2+1, 1, CH) * CLAMP(DW*2+1, 1, CW) * 3 - 1 ; 
+            kv_iters = CLAMP(DT*2+1, 1, CT) * CLAMP(DH*2+1, 1, CH) * CLAMP(DW*2+1, 1, CW) * 3 - 1 ;  //todo 7
         }
 
         kittens::wait(qsmem_semaphore, 0);
