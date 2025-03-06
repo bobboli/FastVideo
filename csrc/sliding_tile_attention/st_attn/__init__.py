@@ -6,16 +6,25 @@ from st_attn_cuda import sta_fwd, sta_fwd_388, sta_fwd_844
 
 def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_text=True):
     seq_length = q_all.shape[2]
+    # print("seq_length====", seq_length)
+    if seq_length == 16 * 32 * 56 + 256:
+        return sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, has_text)  # Dirty fwd
+
+
     if has_text:
         assert q_all.shape[
             2] == 115456, "STA currently only supports video with latent size (30, 48, 80), which is 117 frames x 768 x 1280 pixels"
         assert q_all.shape[1] == len(window_size), "Number of heads must match the number of window sizes"
         target_size = math.ceil(seq_length / 384) * 384
         pad_size = target_size - seq_length
+
+        # print(f"Before padding: q_all.shape: {q_all.shape}, q_all.stride: {q_all.stride()}, q_all.is_contiguous: {q_all.is_contiguous()}")
         if pad_size > 0:
             q_all = torch.cat([q_all, q_all[:, :, -pad_size:]], dim=2)
             k_all = torch.cat([k_all, k_all[:, :, -pad_size:]], dim=2)
             v_all = torch.cat([v_all, v_all[:, :, -pad_size:]], dim=2)
+        # print(f"After padding: q_all.shape: {q_all.shape}, q_all.stride: {q_all.stride()}, q_all.is_contiguous: {q_all.is_contiguous()}")
+
     else:
         assert q_all.shape[2] == 82944
 
@@ -28,6 +37,12 @@ def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_te
                                                     head_index:head_index + 1], v_all[batch:batch + 1,
                                                                                       head_index:head_index + 1],
                                               hidden_states[batch:batch + 1, head_index:head_index + 1])
+
+                        # Debug prints
+            # print(f"Q shape: {q_head.shape} stride: {q_head.stride()} contig: {q_head.is_contiguous()}")
+            # print(f"K shape: {k_head.shape} stride: {k_head.stride()} contig: {k_head.is_contiguous()}") 
+            # print(f"V shape: {v_head.shape} stride: {v_head.stride()} contig: {v_head.is_contiguous()}")
+            # print(f"O shape: {o_head.shape} stride: {o_head.stride()} contig: {o_head.is_contiguous()}")
 
             _ = sta_fwd(q_head, k_head, v_head, o_head, t_kernel, h_kernel, w_kernel, text_length, False, has_text)
     if has_text:
@@ -93,6 +108,12 @@ def sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, ha
                                                     head_index:head_index + 1], v_all[batch:batch + 1,
                                                                                       head_index:head_index + 1],
                                               hidden_states[batch:batch + 1, head_index:head_index + 1])
+
+            # Debug prints
+            # print(f"Q shape: {q_head.shape} stride: {q_head.stride()} contig: {q_head.is_contiguous()}")
+            # print(f"K shape: {k_head.shape} stride: {k_head.stride()} contig: {k_head.is_contiguous()}") 
+            # print(f"V shape: {v_head.shape} stride: {v_head.stride()} contig: {v_head.is_contiguous()}")
+            # print(f"O shape: {o_head.shape} stride: {o_head.stride()} contig: {o_head.is_contiguous()}")
 
             _ = sta_fwd_844(q_head, k_head, v_head, o_head, t_kernel, h_kernel, w_kernel, text_length, False, has_text)
 
