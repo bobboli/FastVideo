@@ -35,27 +35,49 @@ def attention(
 
 
 def tile(x, sp_size):
-    x = rearrange(x, "b (sp t h w) head d -> b (t sp h w) head d", sp=sp_size, t=30 // sp_size, h=48, w=80)
+    if x.shape[1] == 30 * 48 * 80:
+        t, h, w = 30, 48, 80
+        ts_t, ts_h, ts_w = 6, 8, 8
+        n_t, n_h, n_w = 5, 6, 10
+    elif x.shape[1] == 16 * 32 * 56:
+        t, h, w = 16, 32, 56
+        ts_t, ts_h, ts_w = 8, 4, 4
+        n_t, n_h, n_w = 2, 8, 14
+    else:
+        raise ValueError(f"Unsupported sequence length: {x.shape[2]}")
+
+    x = rearrange(x, "b (sp t h w) head d -> b (t sp h w) head d", sp=sp_size, t=t // sp_size, h=h, w=w)
     return rearrange(x,
                      "b (n_t ts_t n_h ts_h n_w ts_w) h d -> b (n_t n_h n_w ts_t ts_h ts_w) h d",
-                     n_t=5,
-                     n_h=6,
-                     n_w=10,
-                     ts_t=6,
-                     ts_h=8,
-                     ts_w=8)
+                     n_t=n_t,
+                     n_h=n_h,
+                     n_w=n_w,
+                     ts_t=ts_t,
+                     ts_h=ts_h,
+                     ts_w=ts_w)
 
 
 def untile(x, sp_size):
+    if x.shape[1] == 30 * 48 * 80:
+        t, h, w = 30, 48, 80
+        ts_t, ts_h, ts_w = 6, 8, 8
+        n_t, n_h, n_w = 5, 6, 10
+    elif x.shape[1] == 16 * 32 * 56:
+        t, h, w = 16, 32, 56
+        ts_t, ts_h, ts_w = 8, 4, 4
+        n_t, n_h, n_w = 2, 8, 14
+    else:
+        raise ValueError(f"Unsupported sequence length: {x.shape[2]}")
+
     x = rearrange(x,
                   "b (n_t n_h n_w ts_t ts_h ts_w) h d -> b (n_t ts_t n_h ts_h n_w ts_w) h d",
-                  n_t=5,
-                  n_h=6,
-                  n_w=10,
-                  ts_t=6,
-                  ts_h=8,
-                  ts_w=8)
-    return rearrange(x, "b (t sp h w) head d -> b (sp t h w) head d", sp=sp_size, t=30 // sp_size, h=48, w=80)
+                  n_t=n_t,
+                  n_h=n_h,
+                  n_w=n_w,
+                  ts_t=ts_t,
+                  ts_h=ts_h,
+                  ts_w=ts_w)
+    return rearrange(x, "b (t sp h w) head d -> b (sp t h w) head d", sp=sp_size, t=t // sp_size, h=h, w=w)
 
 
 def parallel_attention(q, k, v, img_q_len, img_kv_len, text_mask, mask_strategy=None):
@@ -83,9 +105,9 @@ def parallel_attention(q, k, v, img_q_len, img_kv_len, text_mask, mask_strategy=
     encoder_sequence_length = encoder_query.size(1)
 
     if mask_strategy[0] is not None:
-        query = torch.cat([tile(query, nccl_info.sp_size), encoder_query], dim=1).transpose(1, 2)
-        key = torch.cat([tile(key, nccl_info.sp_size), encoder_key], dim=1).transpose(1, 2)
-        value = torch.cat([tile(value, nccl_info.sp_size), encoder_value], dim=1).transpose(1, 2)
+        query = torch.cat([tile(query, nccl_info.sp_size), encoder_query], dim=1).transpose(1, 2)#.contiguous()
+        key = torch.cat([tile(key, nccl_info.sp_size), encoder_key], dim=1).transpose(1, 2)#.contiguous()    
+        value = torch.cat([tile(value, nccl_info.sp_size), encoder_value], dim=1).transpose(1, 2)#.contiguous()
 
         head_num = query.size(1)
         current_rank = nccl_info.rank_within_group
