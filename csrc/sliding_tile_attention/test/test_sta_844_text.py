@@ -21,7 +21,7 @@ tile_size = (8, 4, 4)
 latent_size = (16, 32, 56)
 n_tiles = (2, 8, 14)
 
-text_length =  128
+text_length =  57
 text_max_len = 256
 
 def flex_test(Q, K, V, kernel_size):
