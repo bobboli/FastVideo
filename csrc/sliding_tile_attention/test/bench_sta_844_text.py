@@ -18,16 +18,17 @@ text_max_len = 256
 # Video dimensions
 tile_size = (8, 4, 4)
 latent_size = (16, 32, 56)
-N = latent_size[0] * latent_size[1] * latent_size[2] + text_max_len  # total sequence length
+video_tokens = latent_size[0] * latent_size[1] * latent_size[2]
+N = video_tokens + text_max_len  # total sequence length
 
-def calculate_flop(batch, seqlen, nheads, headdim, tile_seqlen=None, text_len=0):
+def calculate_flop(batch, nheads, headdim, tile_seqlen=None, text_len=0):
     """
     Calculate FLOP (Floating Point Operations) for different attention mechanisms
     
     For standard attention: 4 * batch * seqlen^2 * nheads * headdim
     For sliding tile: 4 * batch * seqlen * tile_seqlen * nheads * headdim
     """
-    video_len = seqlen - text_max_len
+    video_len = N - text_max_len
     
     if tile_seqlen is None:  # Flash
         # Standard attention (full quadratic complexity)
@@ -83,9 +84,10 @@ def main():
     # Store results
     results = {}
     flash_time_ms = None
+    flash_result = None  # Store Flash Attention result temporarily
     
     # Reference FLOP for full attention
-    full_attention_flop = calculate_flop(B, N, H, D, None, text_length)
+    full_attention_flop = calculate_flop(B, H, D, None, text_length)
     print(f"Full attention theoretical FLOP: {full_attention_flop/1e12:.2f} TFLOP")
     
     # Try to benchmark Flash Attention first (for baseline)
@@ -103,7 +105,7 @@ def main():
         flash_time_ms = triton.testing.do_bench(benchmark_flash, warmup=10, rep=100)
         throughput = full_attention_flop / (flash_time_ms / 1000)
         
-        results["Flash Attention"] = {
+        flash_result = {
             'time_ms': flash_time_ms,
             'tile_seqlen': N,  # Full attention tile
             'theoretical_flop': full_attention_flop,
@@ -122,14 +124,14 @@ def main():
     for ks in kernel_sizes:
         ks_str = f"[{ks[0]}, {ks[1]}, {ks[2]}]"
         tile_seqlen = ks[0] * ks[1] * ks[2] * tile_size[0] * tile_size[1] * tile_size[2]
-        sta_flop = calculate_flop(B, N, H, D, tile_seqlen, text_length)
+        sta_flop = calculate_flop(B, H, D, tile_seqlen, text_length)
         
         # Calculate theoretical speedup compared to full attention
         theoretical_speedup = full_attention_flop / sta_flop
         
         print(f"\nTesting kernel size: {ks_str} (tile_seqlen: {tile_seqlen})")
         print(f"  Theoretical FLOP: {sta_flop/1e12:.2f} TFLOP")
-        print(f"  Theoretical speedup: {theoretical_speedup:.2f}x")
+        print(f"  Theoretical speedup: {theoretical_speedup:.2f}")
         
         # Define function to benchmark (with text processing enabled)
         def benchmark_fn():
@@ -143,19 +145,24 @@ def main():
             # Calculate actual speedup compared to Flash Attention if available
             actual_speedup = flash_time_ms / ms if flash_time_ms is not None else float('nan')
             
+            # Calculate kernel efficiency (actual/theoretical speedup ratio)
+            kernel_efficiency = actual_speedup / theoretical_speedup if not np.isnan(actual_speedup) else float('nan')
+            
             results[ks_str] = {
                 'time_ms': ms,
                 'tile_seqlen': tile_seqlen,
                 'theoretical_flop': sta_flop,
                 'tflops': throughput / 1e12,
                 'theoretical_speedup': theoretical_speedup,
-                'actual_speedup': actual_speedup
+                'actual_speedup': actual_speedup,
+                'kernel_efficiency': kernel_efficiency
             }
             
             print(f"  Average time: {ms:.3f} ms")
             print(f"  Throughput: {throughput/1e12:.2f} TFLOP/s")
             if flash_time_ms is not None:
-                print(f"  Actual speedup vs Flash: {actual_speedup:.2f}x")
+                print(f"  Actual speedup vs Flash: {actual_speedup:.2f}")
+                print(f"  Kernel efficiency: {kernel_efficiency:.2f}")
         except Exception as e:
             print(f"  Error with kernel size {ks_str}: {str(e)}")
             results[ks_str] = {
@@ -164,21 +171,25 @@ def main():
                 'theoretical_flop': sta_flop,
                 'tflops': float('nan'),
                 'theoretical_speedup': theoretical_speedup,
-                'actual_speedup': float('nan')
+                'actual_speedup': float('nan'),
+                'kernel_efficiency': float('nan')
             }
     
-    # Filter out failed benchmarks and sort by execution time
-    valid_results = {k: v for k, v in results.items() if not np.isnan(v['time_ms'])}
-    sorted_results = dict(sorted(valid_results.items(), key=lambda item: item[1]['time_ms']))
+    # Add Flash Attention result at the end if available
+    if flash_result is not None:
+        results["Flash Attention"] = flash_result
     
-    if sorted_results:
+    # Filter out failed benchmarks but keep original order
+    valid_results = {k: v for k, v in results.items() if not np.isnan(v['time_ms'])}
+    
+    if valid_results:
         # Create visualization with multiple plots
         plt.figure(figsize=(15, 10))
         
         # Plot 1: Execution Time
         plt.subplot(2, 2, 1)
-        kernel_labels = list(sorted_results.keys())
-        times = [v['time_ms'] for v in sorted_results.values()]
+        kernel_labels = list(valid_results.keys())
+        times = [v['time_ms'] for v in valid_results.values()]
         
         bars = plt.bar(kernel_labels, times, color='skyblue')
         plt.ylabel('Execution Time (ms)', fontsize=12)
@@ -195,7 +206,7 @@ def main():
         
         # Plot 2: Throughput (TFLOP/s)
         plt.subplot(2, 2, 2)
-        throughputs = [v['tflops'] for v in sorted_results.values()]
+        throughputs = [v['tflops'] for v in valid_results.values()]
         
         bars = plt.bar(kernel_labels, throughputs, color='lightgreen')
         plt.ylabel('Throughput (TFLOP/s)', fontsize=12)
@@ -212,7 +223,7 @@ def main():
         
         # Plot 3: Tile Sequence Length vs Time
         plt.subplot(2, 2, 3)
-        tile_seqlens = [v['tile_seqlen'] for v in sorted_results.values()]
+        tile_seqlens = [v['tile_seqlen'] for v in valid_results.values()]
         
         # Create scatter plot with connected lines
         plt.plot(tile_seqlens, times, 'o-', color='coral')
@@ -232,17 +243,17 @@ def main():
         
         # Only include points where we have actual speedup data
         valid_indices = [i for i, k in enumerate(kernel_labels) 
-                        if not np.isnan(sorted_results[k]['actual_speedup'])]
+                        if not np.isnan(valid_results[kernel_labels[i]]['actual_speedup'])]
         
         # Skip this plot if we don't have Flash Attention data
-        if valid_indices and 'Flash Attention' in sorted_results:
-            theoretical_speedups = [sorted_results[kernel_labels[i]]['theoretical_speedup'] for i in valid_indices]
-            actual_speedups = [sorted_results[kernel_labels[i]]['actual_speedup'] for i in valid_indices]
+        if valid_indices and 'Flash Attention' in valid_results:
+            theoretical_speedups = [valid_results[kernel_labels[i]]['theoretical_speedup'] for i in valid_indices]
+            actual_speedups = [valid_results[kernel_labels[i]]['actual_speedup'] for i in valid_indices]
             plot_labels = [kernel_labels[i] for i in valid_indices]
             
             # Create scatter plot
             plt.scatter(theoretical_speedups, actual_speedups, 
-                      c=[sorted_results[kernel_labels[i]]['tile_seqlen'] for i in valid_indices], 
+                      c=[valid_results[kernel_labels[i]]['tile_seqlen'] for i in valid_indices], 
                       cmap='viridis', s=100, alpha=0.7)
             
             # Add diagonal line representing perfect correlation
@@ -264,6 +275,28 @@ def main():
                    ha='center', va='center', fontsize=12)
             plt.axis('off')
         
+        # Add fifth plot if we have efficiency data
+        if any('kernel_efficiency' in v and not np.isnan(v['kernel_efficiency']) for v in valid_results.values()):
+            plt.subplot(2, 3, 5)
+            efficiencies = [v['kernel_efficiency'] for v in valid_results.values() 
+                          if 'kernel_efficiency' in v and not np.isnan(v['kernel_efficiency'])]
+            eff_labels = [k for k, v in valid_results.items() 
+                        if 'kernel_efficiency' in v and not np.isnan(v['kernel_efficiency'])]
+            
+            bars = plt.bar(eff_labels, efficiencies, color='purple')
+            plt.ylabel('Kernel Efficiency', fontsize=12)
+            plt.title('Implementation Efficiency (Actual/Theoretical)', fontsize=14)
+            plt.xticks(rotation=45, ha='right', fontsize=8)
+            plt.axhline(y=1.0, color='red', linestyle='--', alpha=0.5)
+            
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                        f'{height:.2f}', ha='center', fontsize=8)
+            
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+        
         plt.suptitle(f'STA-844 Performance with Text Processing\n(seq_len={N}, text_len={text_length})', fontsize=16)
         plt.tight_layout()
         plt.subplots_adjust(top=0.9)
@@ -273,15 +306,17 @@ def main():
         print("\nNo valid results to plot")
     
     # Print summary table sorted by execution time
-    print("\nSummary Table (sorted by execution time):")
-    print(f"{'Kernel Size':<15} {'Time (ms)':<10} {'TFLOP/s':<10} {'Tile SeqLen':<12} {'Theoritical Speedup':<15} {'Actual Speedup':<15}")
-    print("-" * 80)
+    print(f"{'Kernel Size':<15} {'Time (ms)':<10} {'TFLOP/s':<10} {'Tile SeqLen':<12} {'Theory Speedup':<15} {'Actual Speedup':<15} {'Kernel Eff.':<12}")
+    print("-" * 92)
     
-    for k, v in sorted_results.items():
+    for k, v in valid_results.items():
         actual_speedup = v['actual_speedup']
         actual_speedup_str = f"{actual_speedup:.2f}" if not np.isnan(actual_speedup) else "N/A"
         
-        print(f"{k:<15} {v['time_ms']:<10.3f} {v['tflops']:<10.2f} {v['tile_seqlen']:<12} {v['theoretical_speedup']:<15.2f} {actual_speedup_str:<15}")
+        kernel_eff = v.get('kernel_efficiency', float('nan'))
+        kernel_eff_str = f"{kernel_eff:.2f}" if not np.isnan(kernel_eff) else "N/A"
+        
+        print(f"{k:<15} {v['time_ms']:<10.3f} {v['tflops']:<10.2f} {v['tile_seqlen']:<12} {v['theoretical_speedup']:<15.2f} {actual_speedup_str:<15} {kernel_eff_str:<12}")
     
     # Print failed kernel sizes
     failed = [k for k, v in results.items() if np.isnan(v['time_ms'])]
