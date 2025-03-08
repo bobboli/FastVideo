@@ -210,6 +210,11 @@ def main(args):
 
     with open(args.mask_strategy_file_path, 'r') as f:
         mask_strategy = json.load(f)
+        
+    if args.mask_strategy_selected is not None:
+        for k in mask_strategy.keys():
+            mask_strategy[k] = args.mask_strategy_selected
+
     if args.prompt.endswith('.txt'):
         with open(args.prompt) as f:
             prompts = [line.strip() for line in f.readlines()]
@@ -377,8 +382,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mask_strategy_selected",
         type=lambda x: [int(i) for i in x.strip('[]').split(',')],  # Convert string to list of integers
-        default=[1, 2, 6],  # Now can be directly set as a list
-        help="order of candidates")
+        default=None,  # Now can be directly set as a list
+        help="If not None, the mask strategy specified in --mask_strategy_file_path will be replaced by the mask strategy specified in --mask_strategy_selected")
     parser.add_argument(
         "--rel_l1_thresh",
         type=float,
