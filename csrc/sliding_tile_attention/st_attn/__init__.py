@@ -96,7 +96,7 @@ def sliding_tile_attention_844(q_all, k_all, v_all, window_size, text_length, ha
 
     assert q_all.shape[2] == 16 * 32 * 56 + 256, "STA currently only supports video with latent size (16, 32, 56) with 256 text tokens"
     assert q_all.shape[1] == len(window_size), "Number of heads must match the number of window sizes"
-    assert seq_length % 128 == 0, "sequence length of the image part must be divisible by 128"
+    assert seq_length % 128 == 0, "sequence length of the image+text tokens must be divisible by 128"
 
 
     hidden_states = torch.empty_like(q_all)
