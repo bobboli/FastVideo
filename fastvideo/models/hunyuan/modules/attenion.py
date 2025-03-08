@@ -105,9 +105,9 @@ def parallel_attention(q, k, v, img_q_len, img_kv_len, text_mask, mask_strategy=
     encoder_sequence_length = encoder_query.size(1)
 
     if mask_strategy[0] is not None:
-        query = torch.cat([tile(query, nccl_info.sp_size), encoder_query], dim=1).transpose(1, 2)#.contiguous()
-        key = torch.cat([tile(key, nccl_info.sp_size), encoder_key], dim=1).transpose(1, 2)#.contiguous()    
-        value = torch.cat([tile(value, nccl_info.sp_size), encoder_value], dim=1).transpose(1, 2)#.contiguous()
+        query = torch.cat([tile(query, nccl_info.sp_size), encoder_query], dim=1).transpose(1, 2).contiguous()
+        key = torch.cat([tile(key, nccl_info.sp_size), encoder_key], dim=1).transpose(1, 2).contiguous()    
+        value = torch.cat([tile(value, nccl_info.sp_size), encoder_value], dim=1).transpose(1, 2).contiguous()
 
         head_num = query.size(1)
         current_rank = nccl_info.rank_within_group

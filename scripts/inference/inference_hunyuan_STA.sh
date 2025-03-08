@@ -27,7 +27,7 @@
 
 # Inference with STA only
 num_gpus=1
-mask_strategy_file_path=assets/mask_strategy_hunyuan.json
+mask_strategy_file_path=assets/mask_strategy_hunyuan_5_6_10.json
 export MODEL_BASE=data/hunyuan
 CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=1 --nproc_per_node=$num_gpus --master_port 29603 \
     fastvideo/sample/sample_t2v_hunyuan_STA.py \
