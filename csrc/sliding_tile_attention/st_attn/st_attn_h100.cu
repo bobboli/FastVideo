@@ -486,9 +486,9 @@ sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, 
     int kernel_size_H = kernel_size[1].item<int>();
     int kernel_size_W = kernel_size[2].item<int>();
 
-    TORCH_CHECK(kernel_size_T <= CT, "kernel_size must be less than or equal to num_tiles in the time dimension");
-    TORCH_CHECK(kernel_size_H <= CH, "kernel_size must be less than or equal to num_tiles in the height dimension");
-    TORCH_CHECK(kernel_size_W <= CW, "kernel_size must be less than or equal to num_tiles in the width dimension");
+    TORCH_CHECK(kernel_size_T <= CT, "kernel_size must be less than or equal to num_tiles in the time dimension. kernel_size_T: ", kernel_size_T, ", CT: ", CT);
+    TORCH_CHECK(kernel_size_H <= CH, "kernel_size must be less than or equal to num_tiles in the height dimension. kernel_size_H: ", kernel_size_H, ", CH: ", CH);
+    TORCH_CHECK(kernel_size_W <= CW, "kernel_size must be less than or equal to num_tiles in the width dimension. kernel_size_W: ", kernel_size_W, ", CW: ", CW);
 
     // size -> distance
     int DT = kernel_size_T / 2;
