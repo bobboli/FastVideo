@@ -8,34 +8,43 @@
 #define CLAMP(value, min, max) ((value) < (min) ? (min) : ((value) > (max) ? (max) : (value)))
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 
-constexpr int CONSUMER_WARPGROUPS = (3); 
-constexpr int PRODUCER_WARPGROUPS = (1); 
-constexpr int NUM_WARPGROUPS      = (CONSUMER_WARPGROUPS+PRODUCER_WARPGROUPS); 
-constexpr int NUM_WORKERS         = (NUM_WARPGROUPS*kittens::WARPGROUP_WARPS); 
-
 using namespace kittens;
 namespace cg = cooperative_groups;
 
-template<int D> struct fwd_attend_ker_tile_dims {};
-template<> struct fwd_attend_ker_tile_dims<64> {
-    constexpr static int tile_width = (64);
-    constexpr static int qo_height  = (4*16);
-    constexpr static int kv_height  = (8*16);
-    constexpr static int stages     = (4); 
-};
-template<> struct fwd_attend_ker_tile_dims<128> {
-    constexpr static int tile_width = (128);
-    constexpr static int qo_height  = (4*16);
-    constexpr static int kv_height  = (8*16);
-    constexpr static int stages     = (2); 
+template<int T, int H, int W, int D, int TEXT> 
+struct fwd_attend_ker_metadata {
+    constexpr static int tile_size = T*H*W;
+    constexpr static int tile_width = (D);
+    constexpr static int qo_height  = (64);
+    constexpr static int kv_height  = (64);
+    constexpr static int n_kv_per_tile = tile_size / kv_height; 
+    constexpr static int n_qo_per_tile = tile_size / qo_height;
+
+
+    constexpr static int stages     = (3); 
+
+    constexpr static int max_text_len = TEXT;
+    constexpr static int text_kv_blocks = max_text_len / kv_height;
+
+    static_assert(tile_size % qo_height == 0, "tile_size T*H*W must be divisible by qo_height");
+    constexpr static int CONSUMER_WARPGROUPS = (tile_size / qo_height); 
+    constexpr static int PRODUCER_WARPGROUPS = (1); 
+    constexpr static int NUM_WARPGROUPS      = (CONSUMER_WARPGROUPS+PRODUCER_WARPGROUPS); 
+    constexpr static int NUM_WORKERS         = (NUM_WARPGROUPS*kittens::WARPGROUP_WARPS); 
+
 };
 
-template<int D> struct fwd_globals {
-    using q_tile    =         st_bf<fwd_attend_ker_tile_dims<D>::qo_height, fwd_attend_ker_tile_dims<D>::tile_width>;
-    using k_tile    =         st_bf<fwd_attend_ker_tile_dims<D>::kv_height, fwd_attend_ker_tile_dims<D>::tile_width>;
-    using v_tile    =         st_bf<fwd_attend_ker_tile_dims<D>::kv_height, fwd_attend_ker_tile_dims<D>::tile_width>;
-    using l_col_vec = col_vec<st_fl<fwd_attend_ker_tile_dims<D>::qo_height, fwd_attend_ker_tile_dims<D>::tile_width>>;
-    using o_tile    =         st_bf<fwd_attend_ker_tile_dims<D>::qo_height, fwd_attend_ker_tile_dims<D>::tile_width>;
+
+
+template<int T, int H, int W, int D, int TEXT> 
+struct fwd_globals {
+    using K = fwd_attend_ker_metadata<T, H, W, D, TEXT>;
+
+    using q_tile    =         st_bf<K::qo_height, K::tile_width>;
+    using k_tile    =         st_bf<K::kv_height, K::tile_width>;
+    using v_tile    =         st_bf<K::kv_height, K::tile_width>;
+    using l_col_vec = col_vec<st_fl<K::qo_height, K::tile_width>>;
+    using o_tile    =         st_bf<K::qo_height, K::tile_width>;
 
     using q_gl = gl<bf16,  -1, -1, -1, -1, q_tile>;
     using k_gl = gl<bf16,  -1, -1, -1, -1, k_tile>;
@@ -49,45 +58,70 @@ template<int D> struct fwd_globals {
     l_gl l;
     o_gl o;
 
-    const int N; 
-    const int text_L;
-    const int hr;
+    const int N;  // Total seqlen (image + text)
+    const int text_L;  // Actual text seqlen
+    const int hr;  // Head ratio
+
+    // DT: attended tiles in time
+    // DH: attended tiles in height
+    // DW: attended tiles in width
+    // CT: total number of tiles in time
+    // CH: total number of tiles in height
+    // CW: total number of tiles in width
+    const int DT, DH, DW, CT, CH, CW;
+    const bool text_q, text_kv;  // text_q: Whether process text as query
+// text_kv: Whether process text as key and value
 };
 
+// H: tile size of height
+// W: tile size of width
+// T: tile size of time
+// D: head dim
+// TEXT: max text length
+template<int H, int W, int T, int D, int TEXT>
+__global__  __launch_bounds__((fwd_attend_ker_metadata<T, H, W, D, TEXT>::NUM_WORKERS)*kittens::WARP_THREADS, 1)
+void fwd_attend_ker(
+    const __grid_constant__ fwd_globals<T, H, W, D, TEXT> g) 
+{
 
-template<int D, bool is_causal, bool text_q, bool text_kv, int DT, int DH, int DW, int CT, int CH, int CW>
-__global__  __launch_bounds__((NUM_WORKERS)*kittens::WARP_THREADS, 1)
-void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
+    // static_assert(is_causal == false, "Currently only supports non-causal attention");
+    
+    // if(blockIdx.x == 0 && threadIdx.x == 0) {
+    //     printf("text_L: %d\n", g.text_L);
+    // }
+
     extern __shared__ int __shm[]; 
     tma_swizzle_allocator al((int*)&__shm[0]);
     int warpid = kittens::warpid(), warpgroupid = warpid/kittens::WARPGROUP_WARPS;
 
-    using K = fwd_attend_ker_tile_dims<D>;
+    using K = fwd_attend_ker_metadata<T, H, W, D, TEXT>;
+    using globals = fwd_globals<T, H, W, D, TEXT> ;
 
-    using q_tile    =         st_bf<K::qo_height, K::tile_width>;
-    using k_tile    =         st_bf<K::kv_height, K::tile_width>;
-    using v_tile    =         st_bf<K::kv_height, K::tile_width>;
-    using l_col_vec = col_vec<st_fl<K::qo_height, K::tile_width>>;
-    using o_tile    =         st_bf<K::qo_height, K::tile_width>;
-    
-    q_tile    (&q_smem)[CONSUMER_WARPGROUPS] = al.allocate<q_tile, CONSUMER_WARPGROUPS>();
+    using q_tile = typename globals::q_tile;
+    using k_tile = typename globals::k_tile;
+    using v_tile = typename globals::v_tile;
+    using l_col_vec = typename globals::l_col_vec;
+    using o_tile = typename globals::o_tile;
+
+    q_tile    (&q_smem)[K::CONSUMER_WARPGROUPS] = al.allocate<q_tile, K::CONSUMER_WARPGROUPS>();
     k_tile    (&k_smem)[K::stages]           = al.allocate<k_tile, K::stages          >();
     v_tile    (&v_smem)[K::stages]           = al.allocate<v_tile, K::stages          >();
-    l_col_vec (&l_smem)[CONSUMER_WARPGROUPS] = al.allocate<l_col_vec, CONSUMER_WARPGROUPS>();
+    l_col_vec (&l_smem)[K::CONSUMER_WARPGROUPS] = al.allocate<l_col_vec, K::CONSUMER_WARPGROUPS>();
     auto      (*o_smem)                      = reinterpret_cast<o_tile(*)>(q_smem);
+
     int img_kv_blocks;
     int kv_blocks   = g.N / (K::kv_height);
-    if constexpr (text_kv) {
-        img_kv_blocks = kv_blocks - 3;  // todo1  256 / 64
+    if (g.text_kv) {
+        img_kv_blocks = kv_blocks - K::text_kv_blocks;  // todo1
     } else {
         img_kv_blocks = kv_blocks;
     }
     int kv_head_idx = blockIdx.y / g.hr;
     int seq_idx;
-    if constexpr (text_q) {
-        seq_idx = CT * CH * CW * 6.0 + blockIdx.x * CONSUMER_WARPGROUPS;
+    if (g.text_q) {
+        seq_idx = g.CT * g.CH * g.CW * K::n_qo_per_tile + blockIdx.x * K::CONSUMER_WARPGROUPS;  // todo 6
     } else {
-        seq_idx = blockIdx.x * CONSUMER_WARPGROUPS; 
+        seq_idx = blockIdx.x * K::CONSUMER_WARPGROUPS; 
     }
     __shared__ kittens::semaphore qsmem_semaphore, k_smem_arrived[K::stages], v_smem_arrived[K::stages], compute_done[K::stages];
     if (threadIdx.x == 0) { 
@@ -95,18 +129,17 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
         for(int j = 0; j < K::stages; j++) {
             init_semaphore(k_smem_arrived[j], 0, 1); 
             init_semaphore(v_smem_arrived[j], 0, 1); 
-            init_semaphore(compute_done[j], CONSUMER_WARPGROUPS, 0); 
+            init_semaphore(compute_done[j], K::CONSUMER_WARPGROUPS, 0); 
         }
 
         tma::expect_bytes(qsmem_semaphore, sizeof(q_smem));
 
-        // Load CONSUMER_WARPGROUPS q tiles
-        for (int wg = 0; wg < CONSUMER_WARPGROUPS; wg++) {
+        for (int wg = 0; wg < K::CONSUMER_WARPGROUPS; wg++) {
             coord<q_tile> q_tile_idx = {blockIdx.z, blockIdx.y, (seq_idx) + wg, 0};
             tma::load_async(q_smem[wg], g.q, q_tile_idx, qsmem_semaphore);
         }
 
-        if constexpr (text_q){
+        if (g.text_q) {
             for (int j = 0; j < K::stages - 1; j++) {
                 coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, j, 0};
                 tma::expect_bytes(k_smem_arrived[j], sizeof(k_tile));
@@ -115,20 +148,19 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
                 tma::load_async(v_smem[j], g.v, kv_tile_idx, v_smem_arrived[j]);
             }
         } else {
-            int qt = seq_idx / 6 / (CH * CW);
-            int qh = (seq_idx / 6) % (CH * CW) / CW;
-            int qw = (seq_idx / 6) % CW;
-            qt = CLAMP(qt, DT, CT-DT-1);
-            qh = CLAMP(qh, DH, CH-DH-1);
-            qw = CLAMP(qw, DW, CW-DW-1);
+            int qt = seq_idx / K::n_qo_per_tile / (g.CH * g.CW);
+            int qh = (seq_idx / K::n_qo_per_tile) % (g.CH * g.CW) / g.CW;
+            int qw = (seq_idx / K::n_qo_per_tile) % g.CW;
+            qt = CLAMP(qt, g.DT, g.CT-g.DT-1);
+            qh = CLAMP(qh, g.DH, g.CH-g.DH-1);
+            qw = CLAMP(qw, g.DW, g.CW-g.DW-1);
             int count = 0;
             int j = 0;
-            // Load stages-1 kv tiles
             while (count < K::stages - 1) {
-                int kt = j / 3 / (CH * CW);
-                int kh = (j / 3) % (CH * CW) / CW;
-                int kw = (j / 3) % CW;
-                bool mask = (ABS(qt - kt) <= DT) && (ABS(qh - kh) <= DH) && (ABS(qw - kw) <= DW);
+                int kt = j / K::n_kv_per_tile / (g.CH * g.CW);
+                int kh = (j / K::n_kv_per_tile) % (g.CH * g.CW) / g.CW;
+                int kw = (j / K::n_kv_per_tile) % g.CW;
+                bool mask = (ABS(qt - kt) <= g.DT) && (ABS(qh - kh) <= g.DH) && (ABS(qw - kw) <= g.DW);
                 if (mask){
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, j, 0};
                     tma::expect_bytes(k_smem_arrived[count], sizeof(k_tile));
@@ -146,46 +178,47 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
     int pipe_idx = K::stages - 1; 
     
     // Producer warpgroup
-    if(warpgroupid == NUM_WARPGROUPS-1) {
+    if(warpgroupid == K::NUM_WARPGROUPS-1) {
         warpgroup::decrease_registers<32>();      
         
         int kv_iters; 
-        if constexpr (is_causal) {
-            kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
-            kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
-        }
-        else { kv_iters = kv_blocks-2;}  // todo2  related to stages. <=
+        // if constexpr (is_causal) {
+        //     kv_iters = (seq_idx * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)) - 1 + (CONSUMER_WARPGROUPS * (K::qo_height/kittens::TILE_ROW_DIM<bf16>)); 
+        //     kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
+        // }
+        //else 
+        { kv_iters = kv_blocks - (K::stages-1);}  // todo2 
 
-        if(warpid == NUM_WORKERS-4) {  // todo3   first warp of the producer warpgroup
-            if constexpr (text_q){
+        if(warpid == K::NUM_WORKERS-kittens::WARPGROUP_WARPS) {  // leading warp of the producer warpgroup
+            if (g.text_q) {
                 for (auto kv_idx = pipe_idx - 1; kv_idx <= kv_iters; kv_idx++) {
                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, kv_idx + 1, 0};
                     tma::expect_bytes(k_smem_arrived[(kv_idx+1)%K::stages], sizeof(k_tile));
                     tma::load_async(k_smem[(kv_idx+1)%K::stages], g.k, kv_tile_idx, k_smem_arrived[(kv_idx+1)%K::stages]);
                     tma::expect_bytes(v_smem_arrived[(kv_idx+1)%K::stages], sizeof(v_tile));
                     tma::load_async(v_smem[(kv_idx+1)%K::stages], g.v, kv_tile_idx, v_smem_arrived[(kv_idx+1)%K::stages]);
-                    kittens::wait(compute_done[(kv_idx)%K::stages], (kv_idx/K::stages)%2);
+                        kittens::wait(compute_done[(kv_idx)%K::stages], (kv_idx/K::stages)%2);
                 }
             } else {
-                int qt = seq_idx / 6 / (CH * CW);
-                int qh = (seq_idx / 6) % (CH * CW) / CW;
-                int qw = (seq_idx / 6) % CW;
-                qt = CLAMP(qt, DT, CT-DT-1);
-                qh = CLAMP(qh, DH, CH-DH-1);
-                qw = CLAMP(qw, DW, CW-DW-1);
-                int k_t_min = CLAMP(qt-DT, 0, CT-1);
-                int k_t_max = CLAMP(qt+DT, 0, CT-1);
-                int k_h_min = CLAMP(qh-DH, 0, CH-1);
-                int k_h_max = CLAMP(qh+DH, 0, CH-1);
-                int k_w_min = CLAMP(qw-DW, 0, CW-1);
-                int k_w_max = CLAMP(qw+DW, 0, CW-1);
+                int qt = seq_idx / K::n_qo_per_tile / (g.CH * g.CW);
+                int qh = (seq_idx / K::n_qo_per_tile) % (g.CH * g.CW) / g.CW;
+                int qw = (seq_idx / K::n_qo_per_tile) % g.CW;
+                qt = CLAMP(qt, g.DT, g.CT-g.DT-1);
+                qh = CLAMP(qh, g.DH, g.CH-g.DH-1);
+                qw = CLAMP(qw, g.DW, g.CW-g.DW-1);
+                int k_t_min = CLAMP(qt-g.DT, 0, g.CT-1);
+                int k_t_max = CLAMP(qt+g.DT, 0, g.CT-1);
+                int k_h_min = CLAMP(qh-g.DH, 0, g.CH-1);
+                int k_h_max = CLAMP(qh+g.DH, 0, g.CH-1);
+                int k_w_min = CLAMP(qw-g.DW, 0, g.CW-1);
+                int k_w_max = CLAMP(qw+g.DW, 0, g.CW-1);
                 int count = 0;
                 for (int kt = k_t_min; kt <= k_t_max; kt++) {
                     for (int kh = k_h_min; kh <= k_h_max; kh++) {
                         for (int kw = k_w_min; kw <= k_w_max; kw++) {
-                            for (int j = 0; j <= 2; j++){
+                            for (int j = 0; j < K::n_kv_per_tile; j++){
                                 if (count >= K::stages - 1) {
-                                    int index = ((kt * (CH * CW)) + (kh * CW) + kw) * 3 + j;
+                                    int index = ((kt * (g.CH * g.CW)) + (kh * g.CW) + kw) * K::n_kv_per_tile + j;
                                     coord<k_tile> kv_tile_idx = {blockIdx.z, kv_head_idx, index, 0};
                                     tma::expect_bytes(k_smem_arrived[count%K::stages], sizeof(k_tile));
                                     tma::load_async(k_smem[count%K::stages], g.k, kv_tile_idx, k_smem_arrived[count%K::stages]);
@@ -230,15 +263,16 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
         zero(o_reg);
 
         int kv_iters; 
-        if constexpr (is_causal) {
-            kv_iters = (seq_idx * 4) - 1 + (CONSUMER_WARPGROUPS * 4);
-            kv_iters = (kv_iters/8);
-        }
-        else if constexpr (text_q){ 
+        // if constexpr (is_causal) {
+        //     kv_iters = (seq_idx * 4) - 1 + (CONSUMER_WARPGROUPS * 4);
+        //     kv_iters = (kv_iters/8);
+        // }
+        // else 
+        if (g.text_q){ 
             // the last three kv blocks are for text, we process them separately
             kv_iters = img_kv_blocks - 1;
         } else {
-            kv_iters = CLAMP(DT*2+1, 1, CT) * CLAMP(DH*2+1, 1, CH) * CLAMP(DW*2+1, 1, CW) * 3 - 1 ;  //todo 7
+            kv_iters = CLAMP(g.DT*2+1, 1, g.CT) * CLAMP(g.DH*2+1, 1, g.CH) * CLAMP(g.DW*2+1, 1, g.CW) * K::n_kv_per_tile - 1 ; 
         }
 
         kittens::wait(qsmem_semaphore, 0);
@@ -282,8 +316,8 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
             if(warpgroup::laneid() == 0) arrive(compute_done[(kv_idx)%K::stages], 1);
         }
         // the last three kv blocks are for text, we process them separately
-        if constexpr(text_kv) {
-            for (auto kv_idx = kv_iters + 1; kv_idx <= kv_iters + 3; kv_idx++) {
+        if (g.text_kv) {
+            for (auto kv_idx = kv_iters + 1; kv_idx <= kv_iters + 3; kv_idx++) {  // todo 8
 
                 kittens::wait(k_smem_arrived[(kv_idx)%K::stages], (kv_idx/K::stages)%2);
                 warpgroup::mm_ABt(att_block, q_smem[warpgroupid], k_smem[(kv_idx)%K::stages]);
@@ -360,10 +394,11 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g) {
 
 #include "pyutils/torch_helpers.cuh"
 #include <ATen/cuda/CUDAContext.h>
-#include <iostream>
+
+
 
 torch::Tensor 
-sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, int kernel_t_size, int kernel_h_size, int kernel_w_size, int text_length, bool process_text, bool has_text)
+sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, torch::Tensor img_size, torch::Tensor tile_size, torch::Tensor kernel_size, int text_length, bool process_text)
 {
     CHECK_INPUT(q);
     CHECK_INPUT(k);
@@ -405,7 +440,6 @@ sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, 
     bf16*  d_v = reinterpret_cast<bf16*>(v_ptr);
     
 
-    
     torch::Tensor l_vec = torch::empty({static_cast<const uint>(batch), 
                                         static_cast<const uint>(qo_heads), 
                                         static_cast<const uint>(seq_len), 
@@ -419,273 +453,97 @@ sta_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, 
     float* l_ptr = reinterpret_cast<float*>(l_vec.data_ptr<float>());
     float* d_l   = reinterpret_cast<float*>(l_ptr);
 
-    cudaDeviceSynchronize();
+    cudaDeviceSynchronize();  // TODO: Is this necessary?
     auto stream = at::cuda::getCurrentCUDAStream().stream(); 
 
 
-    if (head_dim == 128) {
-        using q_tile    =         st_bf<fwd_attend_ker_tile_dims<128>::qo_height, fwd_attend_ker_tile_dims<128>::tile_width>;
-        using k_tile    =         st_bf<fwd_attend_ker_tile_dims<128>::kv_height, fwd_attend_ker_tile_dims<128>::tile_width>;
-        using v_tile    =         st_bf<fwd_attend_ker_tile_dims<128>::kv_height, fwd_attend_ker_tile_dims<128>::tile_width>;
-        using l_col_vec = col_vec<st_fl<fwd_attend_ker_tile_dims<128>::qo_height, fwd_attend_ker_tile_dims<128>::tile_width>>;
-        using o_tile    =         st_bf<fwd_attend_ker_tile_dims<128>::qo_height, fwd_attend_ker_tile_dims<128>::tile_width>;
+    TORCH_CHECK(head_dim == 128, "head_dim must be 128");  // TODO: Should be able to relax this
+    int D = head_dim;
+    
 
-        using q_global = gl<bf16,  -1, -1, -1, -1, q_tile>;
-        using k_global = gl<bf16,  -1, -1, -1, -1, k_tile>;
-        using v_global = gl<bf16,  -1, -1, -1, -1, v_tile>;
-        using l_global = gl<float, -1, -1, -1, -1, l_col_vec>;
-        using o_global = gl<bf16,  -1, -1, -1, -1, o_tile>;
+    TORCH_CHECK(img_size.size(0) == 3, "img_size must be 3D");
+    TORCH_CHECK(tile_size.size(0) == 3, "tile_size must be 3D");
+    TORCH_CHECK(kernel_size.size(0) == 3, "kernel_size must be 3D");
+    
 
-        using globals      = fwd_globals<128>;
+    int T = tile_size[0].item<int>();
+    int H = tile_size[1].item<int>();
+    int W = tile_size[2].item<int>();
 
-        q_global qg_arg{d_q, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), static_cast<unsigned int>(seq_len), 128U};
-        k_global kg_arg{d_k, static_cast<unsigned int>(batch), static_cast<unsigned int>(kv_heads), static_cast<unsigned int>(seq_len), 128U};
-        v_global vg_arg{d_v, static_cast<unsigned int>(batch), static_cast<unsigned int>(kv_heads), static_cast<unsigned int>(seq_len), 128U};
-        l_global lg_arg{d_l, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), 1U,   static_cast<unsigned int>(seq_len)};
-        o_global og_arg{d_o, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), static_cast<unsigned int>(seq_len), 128U};
+    int img_size_T = img_size[0].item<int>();
+    int img_size_H = img_size[1].item<int>();
+    int img_size_W = img_size[2].item<int>();
 
-        globals g{qg_arg, kg_arg, vg_arg, lg_arg, og_arg, static_cast<int>(seq_len),  static_cast<int>(text_length), static_cast<int>(hr)};
+    TORCH_CHECK(img_size_T % T == 0, "img_size must be divisible by tile_size in the time dimension");
+    TORCH_CHECK(img_size_H % H == 0, "img_size must be divisible by tile_size in the height dimension");
+    TORCH_CHECK(img_size_W % W == 0, "img_size must be divisible by tile_size in the width dimension");
 
-        auto mem_size = kittens::MAX_SHARED_MEMORY;
-        auto threads  = NUM_WORKERS * kittens::WARP_THREADS;
-        if (has_text) {
-            // TORCH_CHECK(seq_len % (CONSUMER_WARPGROUPS*kittens::TILE_DIM*4) == 0, "sequence length must be divisible by 192");
-            dim3 grid_image(seq_len/(CONSUMER_WARPGROUPS*kittens::TILE_ROW_DIM<bf16>*4-2), qo_heads, batch);  //todo4  bug?
-            dim3 grid_text(2, qo_heads, batch);  //todo5  384 / 192
-            if (!process_text) {
-                if (kernel_t_size == 3 && kernel_h_size == 3 && kernel_w_size == 3) {
+    int CT = img_size_T / T;
+    int CH = img_size_H / H;
+    int CW = img_size_W / W;
 
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 1, 1, 1, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 1, 1, 1, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
+    int kernel_size_T = kernel_size[0].item<int>();
+    int kernel_size_H = kernel_size[1].item<int>();
+    int kernel_size_W = kernel_size[2].item<int>();
 
-                }  else if (kernel_t_size == 3 && kernel_h_size == 3 && kernel_w_size == 5) {
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 1, 1, 2, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true,1, 1, 2, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
+    TORCH_CHECK(kernel_size_T <= CT, "kernel_size must be less than or equal to num_tiles in the time dimension");
+    TORCH_CHECK(kernel_size_H <= CH, "kernel_size must be less than or equal to num_tiles in the height dimension");
+    TORCH_CHECK(kernel_size_W <= CW, "kernel_size must be less than or equal to num_tiles in the width dimension");
 
-                } else if (kernel_t_size == 5 && kernel_h_size == 3 && kernel_w_size == 3) {
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 1, 1, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 1, 1, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
+    // size -> distance
+    int DT = kernel_size_T / 2;
+    int DH = kernel_size_H / 2;
+    int DW = kernel_size_W / 2;
 
-                }else if (kernel_t_size ==3 && kernel_h_size == 5 && kernel_w_size == 5){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 1, 2, 2, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 1, 2, 2, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
 
-                } else if (kernel_t_size ==5 && kernel_h_size == 6 && kernel_w_size == 1){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 3, 0, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 3, 0, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
+    int img_len = img_size_T * img_size_H * img_size_W;
+    int TEXT = seq_len - img_len;
 
-                } else if (kernel_t_size ==5 && kernel_h_size == 3 && kernel_w_size == 5){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 1, 2, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 1, 2, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
+    TORCH_CHECK(TEXT >= text_length, "max_text_len must be no less than than text_length");
 
-                } else if (kernel_t_size == 5 && kernel_h_size == 5 && kernel_w_size == 5){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 2, 2, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 2, 2, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
 
-                } else if (kernel_t_size == 5 && kernel_h_size == 5 && kernel_w_size == 7){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 2, 3, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 2, 3, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-                } else if (kernel_t_size == 5 && kernel_h_size == 6 && kernel_w_size == 10){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 3, 5, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 3, 5, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-                } else if (kernel_t_size == 5 && kernel_h_size == 1 && kernel_w_size == 1){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 0, 0, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 2, 0, 0, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-                } else if (kernel_t_size == 1 && kernel_h_size == 6 && kernel_w_size == 10){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 0, 3, 5, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true, 0, 3, 5, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-                } else if (kernel_t_size == 5 && kernel_h_size == 1 && kernel_w_size == 10){
-                    cudaFuncSetAttribute(
-                        fwd_attend_ker<128, false, false, true, 2, 0, 5, 5, 6, 10>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        mem_size
-                    );
-                    fwd_attend_ker<128, false, false, true,2, 0, 5, 5, 6, 10><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-                } else {
-                    // print error
-                    std::cout << "Invalid kernel size" << std::endl;
-                    //print kernel size
-                    std::cout << "Kernel size: " << kernel_t_size << " " << kernel_h_size << " " << kernel_w_size << std::endl;
-                }
-            } else {
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, true, true, 1, 1, 1, 5, 6, 10>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, true, true, 1, 1, 1, 5, 6, 10><<<grid_text, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            }
+    
+    bool dispatched = false;
 
-        } else {
-            dim3 grid_image(seq_len/(CONSUMER_WARPGROUPS*kittens::TILE_ROW_DIM<bf16>*4), qo_heads, batch);
 
-            if (kernel_t_size == 3 && kernel_h_size == 3 && kernel_w_size == 3) {
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 1, 1, 1, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 1, 1, 1, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            }  else if (kernel_t_size == 3 && kernel_h_size == 3 && kernel_w_size == 6) {
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 1, 1, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false,1, 1, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            } else if (kernel_t_size == 6 && kernel_h_size == 3 && kernel_w_size == 3) {
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 1, 1, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 1, 1, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            } else if (kernel_t_size ==3 && kernel_h_size == 6 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 1, 3, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 1, 3, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            }else if (kernel_t_size ==3 && kernel_h_size == 6 && kernel_w_size == 3){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 1, 3, 1, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 1, 3, 1, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            } else if (kernel_t_size ==6 && kernel_h_size == 3 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 1, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 1, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-
-            } else if (kernel_t_size == 6 && kernel_h_size == 6 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 3, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 3, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 6 && kernel_h_size == 1 && kernel_w_size == 1){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 0, 0, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 0, 0, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 6 && kernel_h_size == 1 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 0, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 0, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            }  else if (kernel_t_size == 6 && kernel_h_size == 6 && kernel_w_size == 1){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 3, 0, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 3, 0, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 1 && kernel_h_size == 6 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 0, 3, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 0, 3, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            }  else if (kernel_t_size == 1 && kernel_h_size == 1 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 0, 0, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 0, 0, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 1 && kernel_h_size == 6 && kernel_w_size == 1){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 0, 3, 0, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 0, 3, 0, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 6 && kernel_h_size == 6 && kernel_w_size == 1){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 3, 0, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 3, 0, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else if (kernel_t_size == 6 && kernel_h_size == 1 && kernel_w_size == 6){
-                cudaFuncSetAttribute(
-                    fwd_attend_ker<128, false, false, false, 3, 0, 3, 6, 6, 6>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    mem_size
-                );
-                fwd_attend_ker<128, false, false, false, 3, 0, 3, 6, 6, 6><<<grid_image, (32*NUM_WORKERS), mem_size, stream>>>(g);
-            } else {
-                // print error
-                std::cout << "Invalid kernel size" << std::endl;
-                //print kernel size
-                std::cout << "Kernel size: " << kernel_t_size << " " << kernel_h_size << " " << kernel_w_size << std::endl;
-            }
-
-        }
-        CHECK_CUDA_ERROR(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+    #define MAYBE_DISPATCH_TILE_SIZE(argT, argH, argW, argD, argTEXT) \
+    if (T == argT && H == argH && W == argW && D == argD && TEXT == argTEXT) { \
+        using K = fwd_attend_ker_metadata<argT, argH, argW, argD, argTEXT>; \
+        using globals = fwd_globals<argT, argH, argW, argD, argTEXT>; \
+        TORCH_CHECK(img_len % (K::CONSUMER_WARPGROUPS * K::qo_height) == 0, "Sequence length of the image part must be divisible by 64"); \
+        TORCH_CHECK(TEXT % (K::CONSUMER_WARPGROUPS * K::qo_height) == 0, "Sequence length of the text part must be divisible by 64"); \
+        globals::q_gl qg_arg{d_q, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), static_cast<unsigned int>(seq_len), K::tile_width}; \
+        globals::k_gl kg_arg{d_k, static_cast<unsigned int>(batch), static_cast<unsigned int>(kv_heads), static_cast<unsigned int>(seq_len), K::tile_width}; \
+        globals::v_gl vg_arg{d_v, static_cast<unsigned int>(batch), static_cast<unsigned int>(kv_heads), static_cast<unsigned int>(seq_len), K::tile_width}; \
+        globals::l_gl lg_arg{d_l, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), 1U,   static_cast<unsigned int>(seq_len)}; \
+        globals::o_gl og_arg{d_o, static_cast<unsigned int>(batch), static_cast<unsigned int>(qo_heads), static_cast<unsigned int>(seq_len), K::tile_width}; \
+        globals g{qg_arg, kg_arg, vg_arg, lg_arg, og_arg, static_cast<int>(seq_len),  static_cast<int>(text_length), static_cast<int>(hr), DT, DH, DW, CT, CH, CW, /*text_q*/process_text, /*text_kv*/true}; \
+        dim3 grid_dim; \
+        if (!process_text) { \
+            grid_dim = dim3(img_len / (K::CONSUMER_WARPGROUPS * K::qo_height), qo_heads, batch); \
+        } else { \
+            grid_dim = dim3(TEXT / (K::CONSUMER_WARPGROUPS * K::qo_height), qo_heads, batch); \
+        } \
+        auto threads = K::NUM_WORKERS * kittens::WARP_THREADS; \
+        auto mem_size = kittens::MAX_SHARED_MEMORY; \
+        cudaFuncSetAttribute(fwd_attend_ker<argH, argW, argT, argD, argTEXT>, cudaFuncAttributeMaxDynamicSharedMemorySize, mem_size); \
+        fwd_attend_ker<argH, argW, argT, argD, argTEXT><<<grid_dim, threads, mem_size, stream>>>(g); \
+        dispatched = true; \
     }
 
+
+    // Note begin: Add more supported tile_size here
+    MAYBE_DISPATCH_TILE_SIZE(8, 4, 4, 128, 256);
+
+    // Note end
+
+
+    if (!dispatched) {
+        TORCH_CHECK(false, "Unsupported: T:", T, " H:", H, " W:", W, " D:", D, " TEXT:", TEXT);
+    }
+
+
     return o;
-    cudaDeviceSynchronize();
+
+    #undef MAYBE_DISPATCH_TILE_SIZE
 }
