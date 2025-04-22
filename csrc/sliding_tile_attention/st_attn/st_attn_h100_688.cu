@@ -172,7 +172,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
         //     kv_iters = ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) == 0) ? (0) : ((kv_iters / (K::kv_height/kittens::TILE_ROW_DIM<bf16>)) - 1);
         // }
         //else 
-        { kv_iters = kv_blocks - (K::stages-1);}  // todo2 
+        { kv_iters = kv_blocks - 2;}  // todo2 
 
         if(warpid == NUM_WORKERS-4) {  // leading warp of the producer warpgroup
             if constexpr (text_q){
@@ -302,7 +302,7 @@ void fwd_attend_ker(const __grid_constant__ fwd_globals<D> g,
         }
         // the last three kv blocks are for text, we process them separately
         if constexpr(text_kv) {
-            for (auto kv_idx = kv_iters + 1; kv_idx <= kv_iters + 3; kv_idx++) {
+            for (auto kv_idx = kv_iters + 1; kv_idx <= kv_iters + text_kv_blocks; kv_idx++) {  // change kv_idx <= kv_iters + 3 as kv_idx <= kv_iters + text_kv_blocks by may
 
                 kittens::wait(k_smem_arrived[(kv_idx)%K::stages], (kv_idx/K::stages)%2);
                 warpgroup::mm_ABt(att_block, q_smem[warpgroupid], k_smem[(kv_idx)%K::stages]);
