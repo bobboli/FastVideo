@@ -17,16 +17,23 @@ causal = False
 mean = 1e-1
 std = 10
 
+tile_size = (6, 8, 8)
+latent_size = (30, 48, 80)
+n_tiles = (5, 6, 10)
+
+text_length =  461
+text_max_len = 540
+
 def flex_test(Q, K, V, kernel_size):
-    # Text-specific parameters for 688 implementation
-    mask = get_sliding_tile_attention_mask(kernel_size, (6, 8, 8), (30, 48, 80), 256, 'cuda', 256)
+    # Text-specific parameters for 688 implementations
+    mask = get_sliding_tile_attention_mask(kernel_size, tile_size, latent_size, text_length, 'cuda', text_max_len)
     output = flex_attention(Q, K, V, block_mask=mask)
     return output
 
 
 def h100_fwd_kernel_test(Q, K, V, kernel_size):
     # Enable text processing with has_text=True
-    o = sliding_tile_attention(Q, K, V, [kernel_size] * h, 256, has_text=True)
+    o = sliding_tile_attention(Q, K, V, [kernel_size] * h, text_length, has_text=True)
     return o
 
 
@@ -47,11 +54,11 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
     }
     
     # Kernel sizes appropriate for text processing
-    kernel_size_ls = [(3, 3, 3), (5, 5, 7), (3, 5, 5)]
+    kernel_size_ls = [(1, 1, 1), (3, 5, 5), n_tiles]
     
-    from tqdm import tqdm
-    for kernel_size in tqdm(kernel_size_ls):
-        print(f"\nTesting kernel size: {kernel_size}")
+    for kernel_size in kernel_size_ls:
+        print("\n"+ "=" * 50)
+        print(f"Testing kernel size: {kernel_size}")
         for iter_num in range(num_iterations):
             print(f"  Iteration {iter_num+1}/{num_iterations}")
             torch.manual_seed(iter_num)  # Different seed for better coverage
@@ -59,12 +66,19 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
             Q = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             K = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
             V = generate_tensor((b, h, n, d), mean, std, torch.bfloat16, 'cuda')
+
             
             try:
                 tk_o = h100_fwd_kernel_test(Q, K, V, kernel_size)
                 pt_o = flex_test(Q, K, V, kernel_size)
 
                 diff = pt_o - tk_o
+
+                # debugging start
+                diff_batch_head = diff[0, 0, :, :]
+                print(diff_batch_head.shape)
+                # debugging end
+
                 abs_diff = torch.abs(diff)
                 current_max_diff = torch.max(abs_diff).item()
                 current_avg_diff = torch.sum(abs_diff).item() / (b * h * n * d)
@@ -85,6 +99,8 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
                 print(f"    Avg relative diff: {avg_rel_diff:.6e}")
             
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"    Error with kernel size {kernel_size}, iteration {iter_num}: {str(e)}")
             
             # Clear cache after each iteration
@@ -107,8 +123,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
 
 
 def generate_error_graphs(b, h, d, causal, mean, std, error_mode='all'):
-    # Use the sequence length for 688 implementation
-    seq_lengths = [30 * 48 * 80 + 256]
+    seq_lengths = [latent_size[0] * latent_size[1] * latent_size[2] + text_max_len]
 
     tk_avg_errors, tk_max_errors = [], []
 
@@ -125,7 +140,7 @@ def generate_error_graphs(b, h, d, causal, mean, std, error_mode='all'):
 
 
 print("=" * 50)
-print("TESTING 688 IMPLEMENTATION WITH TEXT PROCESSING")
+print("TESTING 844 IMPLEMENTATION WITH TEXT PROCESSING")
 print("=" * 50)
 
 for mode in ['output']:
