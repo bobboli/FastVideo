@@ -40,13 +40,10 @@ def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_te
             # print(f"O shape: {o_head.shape} stride: {o_head.stride()} contig: {o_head.is_contiguous()}")
             # torch.cuda.synchronize()  # Ensure prints happen before kernel launch」
 
-            if type(text_length) == list:
-                t = text_length[batch]
-            else:
-                t = text_length
 
-            print("##########q_head.shape", q_head.shape)
 
+            # print("##########q_head.shape", q_head.shape)
+            t = text_length[batch] if type(text_length) == list else text_length
             _ = sta_fwd_688(q_head, k_head, v_head, o_head, t_kernel, h_kernel, w_kernel, t, False, has_text)
 
     for batch in range(q_all.shape[0]):
@@ -54,7 +51,8 @@ def sliding_tile_attention(q_all, k_all, v_all, window_size, text_length, has_te
                                             k_all[batch:batch + 1], v_all[batch:batch + 1],
                                             hidden_states[batch:batch + 1])
 
-        _ = sta_fwd_688(q_head, k_head, v_head, o_head, 3, 3, 3,  text_length[batch], True, has_text)
+        t = text_length[batch] if type(text_length) == list else text_length
+        _ = sta_fwd_688(q_head, k_head, v_head, o_head, 3, 3, 3,  t, True, has_text)
     return hidden_states
 
 

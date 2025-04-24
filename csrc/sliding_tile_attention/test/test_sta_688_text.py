@@ -22,7 +22,7 @@ latent_size = (30, 48, 80)
 n_tiles = (5, 6, 10)
 
 text_length =  461
-text_max_len = 540
+text_max_len = 768
 
 def flex_test(Q, K, V, kernel_size):
     # Text-specific parameters for 688 implementations
@@ -54,7 +54,7 @@ def check_correctness(b, h, n, d, causal, mean, std, num_iterations=10, error_mo
     }
     
     # Kernel sizes appropriate for text processing
-    kernel_size_ls = [(1, 1, 1), (3, 5, 5), n_tiles]
+    kernel_size_ls = [(1, 1, 1), (3, 3, 5), n_tiles]
     
     for kernel_size in kernel_size_ls:
         print("\n"+ "=" * 50)

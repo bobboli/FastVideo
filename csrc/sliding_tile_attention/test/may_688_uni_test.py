@@ -50,8 +50,8 @@ def test():
        k_all = torch.cat([k_all, k_all[:, :, -pad_size:]], dim=2)
        v_all = torch.cat([v_all, v_all[:, :, -pad_size:]], dim=2)
    
-   hidden_states = torch.zeros_like(q_all)
-   hidden_states = sliding_tile_attention(q_all, k_all, v_all, hidden_states, windows, text_length)
+#    hidden_states = torch.zeros_like(q_all)
+   hidden_states = sliding_tile_attention(q_all, k_all, v_all, windows, text_length)
    hidden_states = hidden_states[:, :, :seq_length, :]
    
    
